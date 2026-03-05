@@ -1,41 +1,63 @@
 # Map containsKey / equals dispatch bug (Apex)
 
-Platform bug: for `Map<ICacheKey, ICacheItem>`, `containsKey(lookupKey)` can return false even when `lookupKey.hashCode()` matches a key in the map and `lookupKey.equals(existingKey)` / `existingKey.equals(lookupKey)` are true. Root cause: when the map’s key type is an interface, the platform may not call the key’s `equals()` during `containsKey()` (effectively reference equality).
+Platform bug: for `Map<IKey, V>`, `containsKey(lookupKey)` can return false even when `lookupKey.hashCode()` matches a key in the map and both `lookupKey.equals(existingKey)` and `existingKey.equals(lookupKey)` are true.
 
-## Repro structure
+**Root cause:** when the map’s key type is an interface, the platform may not call the key’s `equals()` during `containsKey()` (effectively using reference equality instead).
 
-| Class | Purpose |
-|-------|--------|
-| `IKey` | Interface (mirrors `ICacheKey`) |
-| `AbstractKey` | **Hypothesis 1**: abstract class between interface and concrete; `equals`/`hashCode` live here |
-| `StringKey` | Concrete key extending `AbstractKey` (interface → abstract → concrete) |
-| `StringKeyDirect` | Concrete key implementing `IKey` directly (baseline: interface → concrete) |
-| `KeyHolder` | **Hypothesis 2**: owns the map and creates/puts the key; caller creates lookup key elsewhere |
-| `MapEqualsDispatchBugRunner` | **Hypothesis 3**: run scenario outside `@IsTest` (Execute Anonymous) |
-| `MapEqualsDispatchBugTest` | Tests for all scenarios |
+## tl;dr with aer vs sfapex
+
+```
+% aer test force-app                                             
+PASS MapEqualsDispatchBugTest.containsKeyWithAbstractMiddle
+
+Ran 1 tests: 1 passed, 0 failed
+```
+
+```
+% sf apex run test -o test-31gzyr326ogv@example.com --synchronous
+ ›   Warning: @salesforce/cli update available from 2.121.7 to 2.124.7.
+=== Test Results
+TEST NAME                                               OUTCOME  MESSAGE                                                                                                         RUNTIME (MS)
+──────────────────────────────────────────────────────  ───────  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────  ────────────
+MapEqualsDispatchBugTest.containsKeyWithAbstractMiddle  Fail     System.AssertException: Assertion Failed: Hypothesis: containsKey with interface→abstract→concrete (StringKey)  
+                                                                 Class.MapEqualsDispatchBugTest.containsKeyWithAbstractMiddle: line 22, column 1                                             
+
+
+
+
+=== Test Summary
+NAME                 VALUE                        
+───────────────────  ─────────────────────────────
+Outcome              Failed                       
+Tests Ran            1                            
+Pass Rate            0%                           
+Fail Rate            100%                         
+Skip Rate            0%                           
+Test Run Id          707Au00002YjYS5              
+Test Setup Time      0 ms                         
+Test Execution Time  61 ms                        
+Test Total Time      61 ms                        
+Org Id               00DAu00000FNHxBMAX           
+Username             test-31gzyr326ogv@example.com
+```
+
+## Minimal repro
+
+| Class        | Purpose |
+|-------------|--------|
+| `IKey`      | Interface declaring `equals`, `hashCode`, `toString`. |
+| `AbstractKey` | Abstract class implementing `IKey`; defines `equals`/`hashCode` (with `System.debug` so you can see if they’re called). |
+| `StringKey` | Concrete key extending `AbstractKey` (interface → abstract → concrete). |
+| `MapEqualsDispatchBugTest` | Single test that puts one key and checks `containsKey` with a second, equal key. |
+
+The test builds a `Map<IKey, String>`, puts `k1 = new StringKey('hello')`, then creates `k2 = new StringKey('hello')`. It asserts that `k1` and `k2` have the same `hashCode` and that `k2.equals(existing)` and `existing.equals(k2)` for the map’s key. Then it asserts `m.containsKey(k2)`. When the bug occurs, that assertion fails and `AbstractKey.equals()` never appears in the Debug Log for the `containsKey` path.
 
 ## How to run
 
-1. **Tests**  
-   Run `MapEqualsDispatchBugTest` (all methods). Check the Debug Log: if the bug appears, `AbstractKey.equals()` (or `StringKeyDirect.equals()`) is never logged for `containsKey`, and the corresponding assertion may fail.
+Run the test class `MapEqualsDispatchBugTest`. If the bug reproduces:
 
-2. **Hypothesis 3 – non-test context**  
-   In Developer Console: **Debug → Open Execute Anonymous Window**, paste:
-   ```apex
-   MapEqualsDispatchBugRunner.runContainsKeyTest();
-   ```
-   Run with **Open Log**. In the log, check whether `containsKey(k2)` is true and whether `AbstractKey.equals() called` appears. If `containsKey` is false and `equals` is never logged, the bug reproduces outside `@IsTest`.
-
-## Hypotheses
-
-- **1. Hierarchy**  
-  Production uses interface → abstract (`StringCacheKey`) → concrete (`SelectByIdCacheKey`). This repro adds `AbstractKey` in the middle with `equals`/`hashCode`. If the bug only appears when the key type is interface → abstract → concrete, the failure should show up in `containsKeyWithAbstractMiddle` or when using `StringKey` in the Runner.
-
-- **2. Where keys are created**  
-  In production, the key in the map is created in one path (e.g. selector/cache) and the lookup key in another (e.g. invalidation/test). `KeyHolder` mimics that: it creates and puts the key; the test (or Runner) creates the lookup key and calls `containsKey`. See `containsKeyCrossClassCreation`.
-
-- **3. Test vs non-test**  
-  The bug might only appear outside `@IsTest`. Use `MapEqualsDispatchBugRunner.runContainsKeyTest()` in Execute Anonymous to compare behavior.
+- The assertion `m.containsKey(k2)` fails.
+- In the Debug Log, `AbstractKey.equals() called` does **not** appear for the `containsKey` call (you may see it for the manual `k2.equals(existing)` / `existing.equals(k2)` checks).
 
 ## Workaround (production)
 

@@ -27,7 +27,7 @@ private class MapEqualsDispatchBugTest {
     /**
      * Transitive hierarchy: IBaseKey <- ConcreteBase <- MidKey <- DeepAbstractKey (abstract with equals) <- ConcreteDeepKey.
      * Confirms the same dispatch bug when equals lives on a deep abstract in a longer chain.
-     */
+     *///foo
     @IsTest
     static void containsKeyWithTransitiveHierarchy() {
         Map<IBaseKey, String> m = new Map<IBaseKey, String>();
